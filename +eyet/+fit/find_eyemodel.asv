@@ -1,0 +1,91 @@
+function [E,E_guess,bestErr] = find_eyemodel(landmarks, C, L, varargin)
+% FIND_EYEMODEL - find an EyeModel given camera landmarks, camera model, and light model
+%
+% [E,E_guess,bestErr] = eyet.fit.find_eyemodel(LANDMARKS, C, L, ...)
+%
+% Given LANDMARKS, a CameraImageLandmark object with pupil, skin, and glint positions, and
+% an eyet.CameraModel C and a light model L, calculate the best fit eyet.EyeModel E.
+%
+% An initial guess E_guess is constructed, and then a fitting procedure is run to optimize the
+% initial guess. 
+%
+% bestErr is the sum of squared errors of the differences between the
+% fit light locations and the model L light locations plus the difference
+% between the identified pupil and the surface of the fit eye.
+%
+% This function also takes name/value pairs that modify its behavior:
+%
+% --------------------------------------------------------------------------------
+% | Parameter (default value)            | Description                           |
+% |--------------------------------------|---------------------------------------|
+% | Eye_radii_guess ([1.01;2.1;0.99])    | Eye radii initial guess               |
+% | Eye_radii_min ([0.8;1.8;0.8])        | Minimum eye radii                     |
+% | Eye_radii_max ([1.2;2.2;1.2])        | Maximum eye radii                     |
+% | number_of_starts (10)                | Number of times to search for the best|
+% |                                      | fit from a random starting position.  |
+% |--------------------------------------|---------------------------------------|
+%
+% 
+%
+%
+
+number_of_starts = 10;
+Eye_radii_guess = [1;1;1];
+Eye_radii_min = [0.8;0.8;0.8];
+Eye_radii_max = [1.2;1.2;1.2];
+
+vlt.data.assign(varargin{:});
+
+  % Step 1, estimate the eye plane
+
+world_coords = landmarks.worldlandmarks(C);
+
+% keyboard;
+
+t = world_coords.eye_plane.t;
+Eye_rotation_initial = vlt.math.rad2deg([t(1);t(2);0]); % initial eye rotation guess
+Eye_center_initial = (world_coords.eye_plane.P1+world_coords.eye_plane.P2)/2;
+
+ % Step 2: search for the system
+
+options = optimoptions('lsqnonlin','Display','iter','algorithm','trust-region-reflective');
+
+lower = [ Eye_radii_min(1:3); Eye_center_initial(1)-1;Eye_center_initial(2)-1;Eye_center_initial(3)-1]
+upper = [ Eye_radii_max(1:3);Eye_center_initial(1)+1;Eye_center_initial(2)+1;Eye_center_initial(3)+1]
+
+E_guess = eyet.EyeModel('eye_ellipse_size',Eye_center_initial,'eye_center',Eye_center_initial,...
+	'eye_rotation',Eye_rotation_initial);
+
+figure;
+eyet.plot.system(C,E_guess,L)
+
+bestErr = Inf;
+X_best = [];
+
+for i=1:number_of_starts,
+	X0 =  [ E_guess.eye.radii(:); E_guess.eye.center+randn(3,1); ];
+
+	[X_1,fval,exitflag,output] = lsqnonlin(@(x) ...
+                [eyet.fit.lightsource_error(landmarks.glints, ...
+			eyet.EyeModel('eye_ellipse_size',x(1:3),'eye_center',x(4:6),...
+			'eye_rotation',Eye_rotation_initial), L, C); ...
+			eyet.fit.pupil_error(landmarks.pupil, ...
+			eyet.EyeModel('eye_ellipse_size',x(1:3),'eye_center',x(4:6),...
+			'eye_rotation',Eye_rotation_initial), C); ], ...
+		[ X0 ],lower, upper, options);
+
+	if sum(fval)<bestErr, % did we beat our best?
+		bestErr = sum(fval); 
+		X_best = X_1;
+	end;
+end;
+
+E_ellipse_size = vlt.data.colvec(X_best(1:3));
+E_center = vlt.data.colvec(X_best(4:6));
+
+ % preliminary eye to use to calculate pupil elevation, azimuth
+Eye_prelim = eyet.math.ellipsoid3(E_ellipse_size, E_center, vlt.math.deg2rad(Eye_rotation_initial));
+[i,v,d,az,el] = Eye_prelim.closest_pt_on_ellipsoid(world_coords.pupil);
+
+E = eyet.EyeModel('eye_ellipse_size',E_ellipse_size,'eye_center',E_center, 'eye_rotation', Eye_rotation_initial,...
+        'pupil_elevation_angle',vlt.math.rad2deg(el),'pupil_azimuth_angle',vlt.math.rad2deg(az));
